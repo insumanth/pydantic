@@ -834,6 +834,11 @@ class GenerateJsonSchema:
         """
         return self.handle_invalid_for_json_schema(schema, 'core_schema.CallableSchema')
 
+    def nested_model_schema(self, schema: core_schema.NestedModelSchema) -> JsonSchemaValue:
+        new_schema = cast('type[BaseModel]', schema['model']).__pydantic_core_schema__
+        json_schema = self.model_schema(new_schema)
+        return json_schema
+
     def list_schema(self, schema: core_schema.ListSchema) -> JsonSchemaValue:
         """Returns a schema that matches a list schema.
 

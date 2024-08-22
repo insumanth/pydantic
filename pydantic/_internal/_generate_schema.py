@@ -357,6 +357,7 @@ class GenerateSchema:
     """Generate core schema for a Pydantic model, dataclass and types like `str`, `datetime`, ... ."""
 
     __slots__ = (
+        '_rebuild_nested_model_schemas',
         '_config_wrapper_stack',
         '_types_namespace_stack',
         '_typevars_map',
@@ -371,6 +372,7 @@ class GenerateSchema:
         types_namespace: dict[str, Any] | None,
         typevars_map: dict[Any, Any] | None = None,
     ) -> None:
+        self._rebuild_nested_model_schemas = False
         # we need a stack for recursing into child models
         self._config_wrapper_stack = ConfigWrapperStack(config_wrapper)
         self._types_namespace_stack = TypesNamespaceStack(types_namespace)
@@ -382,6 +384,7 @@ class GenerateSchema:
     @classmethod
     def __from_parent(
         cls,
+        rebuild_nested_model_schemas: bool,
         config_wrapper_stack: ConfigWrapperStack,
         types_namespace_stack: TypesNamespaceStack,
         model_type_stack: _ModelTypeStack,
@@ -389,6 +392,7 @@ class GenerateSchema:
         defs: _Definitions,
     ) -> GenerateSchema:
         obj = cls.__new__(cls)
+        obj._rebuild_nested_model_schemas = rebuild_nested_model_schemas
         obj._config_wrapper_stack = config_wrapper_stack
         obj._types_namespace_stack = types_namespace_stack
         obj.model_type_stack = model_type_stack
@@ -409,6 +413,7 @@ class GenerateSchema:
     def _current_generate_schema(self) -> GenerateSchema:
         cls = self._config_wrapper.schema_generator or GenerateSchema
         return cls.__from_parent(
+            self._rebuild_nested_model_schemas,
             self._config_wrapper_stack,
             self._types_namespace_stack,
             self.model_type_stack,
@@ -806,6 +811,11 @@ class GenerateSchema:
         # avoid calling `__get_pydantic_core_schema__` if we've already visited this object
         if is_self_type(obj):
             obj = self.model_type_stack.get()
+
+        BaseModel = import_cached_base_model()
+        if len(self.model_type_stack._stack) > 0 and lenient_issubclass(obj, BaseModel) and self._rebuild_nested_model_schemas == False:
+            return core_schema.nested_model_schema(model=obj)
+
         with self.defs.get_schema_or_ref(obj) as (_, maybe_schema):
             if maybe_schema is not None:
                 return maybe_schema
@@ -1300,9 +1310,12 @@ class GenerateSchema:
 
         with self.field_name_stack.push(name):
             if field_info.discriminator is not None:
+                old = self._rebuild_nested_model_schemas
+                self._rebuild_nested_model_schemas = True
                 schema = self._apply_annotations(
                     source_type, annotations + validators_from_decorators, transform_inner_schema=set_discriminator
                 )
+                self._rebuild_nested_model_schemas = old
             else:
                 schema = self._apply_annotations(
                     source_type,
@@ -1356,6 +1369,10 @@ class GenerateSchema:
         else:
             validation_alias = field_info.validation_alias
 
+        # BaseModel = import_cached_base_model()
+        # if lenient_issubclass(field_info.annotation, BaseModel):
+        #     schema = core_schema.nested_model_schema(model=field_info.annotation)
+
         return _common_field(
             schema,
             serialization_exclude=True if field_info.exclude else None,
@@ -1370,11 +1387,17 @@ class GenerateSchema:
         args = self._get_args_resolving_forward_refs(union_type, required=True)
         choices: list[CoreSchema] = []
         nullable = False
+        # Don't use `nested-model` schemas for union choices as optimizing the returned CoreSchema
+        # requires being able to access the CoreSchema for all nested models which is not possible
+        # in the case of cycles with a model that may contain this union
+        old = self._rebuild_nested_model_schemas
+        self._rebuild_nested_model_schemas = True
         for arg in args:
             if arg is None or arg is _typing_extra.NoneType:
                 nullable = True
             else:
                 choices.append(self.generate_schema(arg))
+        self._rebuild_nested_model_schemas = old
 
         if len(choices) == 1:
             s = choices[0]
